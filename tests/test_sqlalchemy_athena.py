@@ -28,7 +28,7 @@ from sqlalchemy.sql.sqltypes import (
     TIMESTAMP,
 )
 
-from pyathena.sqlalchemy_athena import AthenaDialect
+from pyathena.sqlalchemy_athena import LIMIT_COMMENT_COLUMN, AthenaDialect
 from tests.conftest import ENV, SCHEMA
 from tests.util import with_engine
 
@@ -182,7 +182,7 @@ class TestSQLAlchemyAthena(unittest.TestCase):
         self.assertTrue(actual["nullable"])
         self.assertIsNone(actual["default"])
         self.assertEqual(actual["ordinal_position"], 1)
-        self.assertIsNone(actual["comment"])
+        self.assertEqual(actual["comment"], "some comment")
 
     @with_engine()
     def test_char_length(self, engine, conn):
@@ -579,3 +579,99 @@ class TestSQLAlchemyAthena(unittest.TestCase):
                 """
             ),
         )
+
+    @with_engine()
+    def test_create_table_with_comment(self, engine, conn):
+        insp = sqlalchemy.inspect(engine)
+        table_name = "table_name_000"
+        column_name = "c"
+        table = Table(
+            table_name,
+            MetaData(),
+            Column(column_name, String(10), comment="some descriptive comment"),
+            schema=SCHEMA,
+            awsathena_location=f"{ENV.s3_staging_dir}/{SCHEMA}/{table_name}",
+        )
+        table.create(bind=conn)
+        check_table = Table(table_name, MetaData(), autoload=True, autoload_with=conn)
+        self.assertIsNot(check_table, table)
+        self.assertIsNot(check_table.metadata, table.metadata)
+        self.assertEqual(
+            check_table.c[column_name].comment, table.c[column_name].comment
+        )
+
+    @with_engine()
+    def test_column_comment_containing_single_quotes(self, engine, conn):
+        """Ensure a comment that contains a placeholder is safe"""
+        table_name = "table_name_column_comment_single_quotes"
+        column_name = "c"
+        comment = "let's make sure quotes ain\\'t a problem"
+        table = Table(
+            table_name,
+            MetaData(),
+            Column(column_name, String(10), comment=comment),
+            schema=SCHEMA,
+            awsathena_location=f"{ENV.s3_staging_dir}/{SCHEMA}/{table_name}",
+        )
+        conn.execute(CreateTable(table), parameter="some value")
+        check_table = Table(table_name, MetaData(), autoload=True, autoload_with=conn)
+        self.assertIsNot(check_table, table)
+        self.assertIsNot(check_table.metadata, table.metadata)
+        self.assertEqual(check_table.c[column_name].comment, comment)
+
+    @with_engine()
+    def test_column_comment_containing_placeholder(self, engine, conn):
+        """Ensure a comment that contains a placeholder is safe"""
+        table_name = "table_name_placeholder_in_column_comment"
+        column_name = "c"
+        comment = "the %(parameter)s ratio (in %)"
+        table = Table(
+            table_name,
+            MetaData(),
+            Column(column_name, String(10), comment=comment),
+            schema=SCHEMA,
+            awsathena_location=f"{ENV.s3_staging_dir}/{SCHEMA}/{table_name}",
+        )
+        conn.execute(CreateTable(table), parameter="some value")
+        check_table = Table(table_name, MetaData(), autoload=True, autoload_with=conn)
+        self.assertIsNot(check_table, table)
+        self.assertIsNot(check_table.metadata, table.metadata)
+        self.assertEqual(check_table.c[column_name].comment, comment)
+
+    @with_engine()
+    def test_long_column_comment_are_truncated(self, engine, conn):
+        table_name = "table_name_long_column_comment"
+        column_name = "c"
+        comment = "qwerty" * LIMIT_COMMENT_COLUMN
+        table = Table(
+            table_name,
+            MetaData(),
+            Column(column_name, String(10), comment=comment),
+            schema=SCHEMA,
+            awsathena_location=f"{ENV.s3_staging_dir}/{SCHEMA}/{table_name}",
+        )
+        conn.execute(CreateTable(table), parameter="some value")
+        check_table = Table(table_name, MetaData(), autoload=True, autoload_with=conn)
+        self.assertIsNot(check_table, table)
+        self.assertIsNot(check_table.metadata, table.metadata)
+        self.assertEqual(
+            check_table.c[column_name].comment, comment[:LIMIT_COMMENT_COLUMN]
+        )
+
+    @with_engine()
+    def test_column_comment_blanks_are_squashed(self, engine, conn):
+        table_name = "table_name_column_comment_with_blanks"
+        column_name = "c"
+        comment = "abc\n \t \r \vd"
+        table = Table(
+            table_name,
+            MetaData(),
+            Column(column_name, String(10), comment=comment),
+            schema=SCHEMA,
+            awsathena_location=f"{ENV.s3_staging_dir}/{SCHEMA}/{table_name}",
+        )
+        conn.execute(CreateTable(table), parameter="some value")
+        check_table = Table(table_name, MetaData(), autoload=True, autoload_with=conn)
+        self.assertIsNot(check_table, table)
+        self.assertIsNot(check_table.metadata, table.metadata)
+        self.assertEqual(check_table.c[column_name].comment, "abc d")

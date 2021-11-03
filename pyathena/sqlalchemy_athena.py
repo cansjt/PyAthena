@@ -31,6 +31,32 @@ from tenacity import retry_if_exception, stop_after_attempt, wait_exponential
 
 import pyathena
 
+BLANKS = re.compile(r"\s\s*")
+# TODO: is there a better place for those ?
+LIMIT_COMMENT_COLUMN = 255
+
+
+def process_comment_literal(value, dialect, squash_blanks=False):
+    """Escapes comments in DDL statements
+
+    String literals in COMMENT are not escaped in the same way as data
+    literal strings. Data literal use '' (double single quotes), comments escape
+    single quotes with a \\ (backslash).
+    Additionally, column comments do not support the presence of new line, carriage
+    return, etc. characters while table comments do. Hence the ``squash_blanks``
+    argument.
+    Finally, % (percent signs) need to be escaped, by being doubled, so has to not
+    be confused with placeholders for query parameters.
+    """
+    value = value.replace("\\", "\\\\").replace("'", r"\'")
+    if squash_blanks:
+        value = BLANKS.sub(" ", value)  # Replace blanks with plain spaces
+    # DDL statements raise a KeyError if the placeholders aren't escaped
+    if dialect.identifier_preparer._double_percents:
+        value = value.replace("%", "%%")
+
+    return "'%s'" % value
+
 
 class UniversalSet(object):
     """UniversalSet
@@ -177,6 +203,34 @@ class AthenaDDLCompiler(DDLCompiler):
             schema_translate_map=schema_translate_map,
             compile_kwargs=compile_kwargs,
         )
+
+    def get_column_specification(self, column, **kwargs):
+        colspec = (
+            self.preparer.format_column(column)
+            + " "
+            + self.dialect.type_compiler.process(column.type, type_expression=column)
+        )
+        # Athena does not support column default
+        # if default is not None:
+        #     warnings.warn(
+        #         "{column.table.name}.{column.name}: the awsathena dialect "
+        #         "does not support column default values"
+        #     )
+        comment = ""
+        if column.comment:
+            comment += " COMMENT "
+            comment += process_comment_literal(
+                column.comment[:LIMIT_COMMENT_COLUMN],
+                self.dialect,
+                squash_blanks=True,
+            )
+        # Athena does not support NOT NULL constraints
+        # if not column.nullable:
+        #     warnings.warn(
+        #         "{column.table.name}.{column.name}: the awsathena dialect "
+        #         "does not support NOT NULL constraints"
+        #     )
+        return f"{colspec}{comment}"
 
     def visit_create_table(self, create):
         table = create.element
