@@ -621,8 +621,7 @@ class TestSQLAlchemyAthena(unittest.TestCase):
         )
 
     @with_engine()
-    def test_create_table_with_comment(self, engine, conn):
-        insp = sqlalchemy.inspect(engine)
+    def test_create_table_with_comments(self, engine, conn):
         table_name = "table_name_000"
         column_name = "c"
         table = Table(
@@ -631,14 +630,24 @@ class TestSQLAlchemyAthena(unittest.TestCase):
             Column(column_name, String(10), comment="some descriptive comment"),
             schema=SCHEMA,
             awsathena_location=f"{ENV.s3_staging_dir}/{SCHEMA}/{table_name}",
+            comment=textwrap.dedent(
+                """
+            Some table comment
+
+            a multiline one that should stay as is.
+            """
+            ),
         )
         table.create(bind=conn)
-        check_table = Table(table_name, MetaData(), autoload=True, autoload_with=conn)
+        check_table = Table(
+            table_name, MetaData(schema=SCHEMA), autoload=True, autoload_with=conn
+        )
         self.assertIsNot(check_table, table)
         self.assertIsNot(check_table.metadata, table.metadata)
         self.assertEqual(
             check_table.c[column_name].comment, table.c[column_name].comment
         )
+        self.assertEqual(check_table.comment, table.comment)
 
     @with_engine()
     def test_column_comment_containing_single_quotes(self, engine, conn):

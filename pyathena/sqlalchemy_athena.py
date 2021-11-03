@@ -37,6 +37,10 @@ import pyathena
 BLANKS = re.compile(r"\s\s*")
 # TODO: is there a better place for those ?
 LIMIT_COMMENT_COLUMN = 255
+# TODO: experimented with this. Not sure there is a limit. Still happy with
+# more than 128kB. Maybe we should put the column comments here instead of
+# truncating them in an arbitrary way.
+LIMIT_COMMENT_TABLE = None
 
 
 def _replace_blanks(matchobj):
@@ -284,8 +288,19 @@ class AthenaDDLCompiler(DDLCompiler):
             if hasattr(table, "bind") and table.bind
             else None
         )
+        text = ""
+
+        if table.comment:
+            text += (
+                " COMMENT "
+                + process_comment_literal(
+                    table.comment[:LIMIT_COMMENT_TABLE], self.dialect
+                )
+                + "\n"
+            )
+
         # TODO Supports orc, avro, json, csv or tsv format
-        text = "STORED AS PARQUET\n"
+        text += "STORED AS PARQUET\n"
 
         if dialect_opts["location"]:
             location = dialect_opts["location"]
