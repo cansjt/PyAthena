@@ -3,12 +3,14 @@ import math
 import numbers
 import re
 from distutils.util import strtobool
+from typing import Any, List, Mapping, Tuple
 
 import tenacity
-from sqlalchemy import exc, util
+from sqlalchemy import exc, schema, util
 from sqlalchemy.engine import Engine, reflection
 from sqlalchemy.engine.default import DefaultDialect
 from sqlalchemy.exc import NoSuchTableError, OperationalError
+from sqlalchemy.sql.base import DialectKWArgs
 from sqlalchemy.sql.compiler import (
     DDLCompiler,
     GenericTypeCompiler,
@@ -215,7 +217,12 @@ class AthenaDDLCompiler(DDLCompiler):
         return text
 
     def post_create_table(self, table):
-        raw_connection = table.bind.raw_connection()
+        if table.bind:
+            return self._post_create_table_with_bind(table, table.bind.raw_connection())
+        else:
+            return self._post_create_table(table)
+
+    def _post_create_table_with_bind(self, table, raw_connection):
         # TODO Supports orc, avro, json, csv or tsv format
         text = "STORED AS PARQUET\n"
 
@@ -238,6 +245,21 @@ class AthenaDDLCompiler(DDLCompiler):
                 compression.upper()
             )
 
+        return text
+
+    def _post_create_table(self, table):
+        text = "STORED AS PARQUET\n"
+        location = table.dialect_options['awsathena']['location']
+        if not location:
+            raise exc.CompileError(
+               "The `awsathena_location` dialect kwargs is required"
+               " in the table definition."
+            )
+        if location[-1] != '/':
+            location = f'{location}/'
+        schema = f'{table.schema}/' if table.schema else ''
+        text += "LOCATION '{0}{1}{2}/'\n".format(location, schema, table.name)
+        # Will add back compression in later commits, with more dialect kwargs
         return text
 
 
@@ -289,6 +311,14 @@ class AthenaDialect(DefaultDialect):
         r"(((Database|Namespace)\ (?P<schema>.+))|(Table\ (?P<table>.+)))\ not\ found\."
     )
     _pattern_column_type = re.compile(r"^([a-zA-Z]+)($|\(.+\)$)")
+    construct_arguments: List[Tuple[DialectKWArgs, Mapping[str, Any]]] = [
+        (
+            schema.Table,
+            {
+                "location": None,
+            },
+        ),
+    ]
 
     @classmethod
     def dbapi(cls):
