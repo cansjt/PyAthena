@@ -2,7 +2,7 @@
 import re
 
 import pytest
-from sqlalchemy import Column, Integer, MetaData, String, Table
+from sqlalchemy import Column, func, Integer, MetaData, select, String, Table
 from sqlalchemy.sql.ddl import CreateTable
 from tests.conftest import SCHEMA
 
@@ -85,6 +85,20 @@ def test_create_table_with_int_column(location, schema_name, table_name):
 
     # Then
     assert column_pattern.findall(str(statement))[0] == 'INT'
+
+
+def test_ddl_int_compilation_fix_does_not_break_dml():
+    """Ensure the fix for issue #260 does not introduce regressions in DML compilation
+    """
+    # Given
+    query = select(func.cast('1234', Integer))
+    dialect = AthenaDialect()
+
+    # When
+    statement = dialect.statement_compiler(dialect, query)
+
+    # Then
+    assert "INTEGER" in str(statement)
 
 
 # vim: et:sw=4:syntax=python:ts=4:

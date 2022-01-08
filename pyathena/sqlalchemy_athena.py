@@ -6,7 +6,7 @@ from distutils.util import strtobool
 from typing import Any, List, Mapping, Tuple
 
 import tenacity
-from sqlalchemy import exc, schema, util
+from sqlalchemy import Column, exc, schema, util
 from sqlalchemy.engine import Engine, reflection
 from sqlalchemy.engine.default import DefaultDialect
 from sqlalchemy.exc import NoSuchTableError, OperationalError
@@ -102,6 +102,16 @@ class AthenaTypeCompiler(GenericTypeCompiler):
             }
 
     def visit_INTEGER(self, type_, **kw):
+        """
+        Notes:
+
+          Athena uses different names for integer depending on the type of query.
+          It uses ``INT`` for DDL statements, ``INTEGER`` for DML statements.
+        """
+        # How reliable is this? In DDL we receive the full column object
+        # In other expressions, e.g. a cast, we receive an Integer type instance
+        if isinstance(kw['type_expression'], Column):
+            return "INT"
         return "INTEGER"
 
     def visit_SMALLINT(self, type_, **kw):
