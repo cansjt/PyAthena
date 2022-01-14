@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
+import io
 import math
 import numbers
+import os
 import re
 from distutils.util import strtobool
+from typing import Dict
 
 import tenacity
 from sqlalchemy import exc, schema, util
@@ -34,6 +37,12 @@ import pyathena
 BLANKS = re.compile(r"\s\s*")
 # TODO: is there a better place for those ?
 LIMIT_COMMENT_COLUMN = 255
+
+
+def _replace_blanks(matchobj):
+    return {"\\n": "\n", "\\v": "\v", "\\t": "\t", "\\r": "\r"}.get(
+        matchobj.group(0), " "
+    )
 
 
 def process_comment_literal(value, dialect, squash_blanks=False):
@@ -438,6 +447,117 @@ class AthenaDialect(DefaultDialect):
             schema=schema
         )
         return [row.table_name for row in connection.execute(query).fetchall()]
+
+    @reflection.cache
+    def _get_table_details(self, connection, table_name, schema=None, **kw):
+        preparer = self.ddl_compiler(self, None).preparer
+        quoted_table_name = preparer.quote(table_name)
+        if schema:
+            quoted_table_name = preparer.quote_schema(schema) + "." + quoted_table_name
+        DESCRIBE_SQL = f"DESCRIBE FORMATTED {table_name}"
+        c = self._raw_connection(connection).cursor()
+        c.execute(DESCRIBE_SQL)
+        buff = (
+            io.BytesIO()
+        )  # Using a BytesIO to be able to perform .seek(n, SEEK_CUR) ops.
+        for line in c.fetchall():  # SQLAlchemy cursor failse to parse the query result
+            buff.write(line[0].encode("utf-8"))
+            buff.write(b"\n")
+        buff.seek(0, os.SEEK_SET)
+        return self._parse_table_description(buff)
+
+    def _parse_columns_information(self, buff):
+        next(buff)  # always one blank line under the header
+        self._skip_unknown_section(buff)
+        return []
+
+    def _parse_detailed_table_information(self, buff):
+        table_kwargs: Dict[str, str] = {}
+        for line in buff:
+            if line[:1] == b"#":  # New section title, "push" it back in the buffer
+                buff.seek(-len(line), os.SEEK_CUR)
+                return table_kwargs
+            if re.match(b"^\\s*$", line):  # End of section
+                return table_kwargs
+            bits = [
+                bit.strip().decode("utf-8")
+                for bit in line.lower().split(b":", maxsplit=1)
+            ]
+            if bits[0] == "location":
+                table_kwargs["awsathena_location"] = bits[1]
+            elif bits[0] == "database":
+                table_kwargs["schema"] = bits[1]
+            elif bits[0] == "table parameters":
+                table_kwargs.update(self._parse_table_parameters(buff))
+        # End of file
+        return table_kwargs
+
+    def _parse_table_parameters(self, buff):
+        table_kwargs: Dict[str, str] = {}
+        for line in buff:
+            if re.match(b"^\\s*$", line):  # End of section
+                return table_kwargs
+            parameter, value = re.split(
+                "\\s+", line.decode("utf-8").strip(), maxsplit=1
+            )
+            if "comment" == parameter.lower():
+                table_kwargs.update(
+                    {"comment": re.sub(r"(?:\\)([nrtv])", _replace_blanks, value)}
+                )
+            else:
+                continue
+        # End of file
+        return table_kwargs
+
+    def _parse_partition_information(self, buff):
+        subsection = next(buff)
+        assert re.match(b"^#\\s+col_name.*$", subsection)
+        return self._parse_columns_information(buff)
+
+    def _parse_storage_details(self, buff):
+        """Parses the storage related information of the table
+
+        This section of the table description contains the SerDe information,
+        row formats details, _etc._ useful to fill in some of the dialect kwargs.
+
+        TODO: actually implement this for now the section is ignored
+        """
+        self._skip_unknown_section(buff)
+        return {}
+
+    def _parse_table_description(self, buff):
+        table_kwargs: Dict[str, str] = {}
+        columns = []
+        partition_columns = []
+        for section_title in buff:
+            if re.match(
+                b"^#\\s+Detailed\\s+Table\\s+Information.*", section_title, re.I
+            ):
+                table_kwargs.update(self._parse_detailed_table_information(buff))
+            elif re.match(b"^#\\s+partition\\s+information\\s*$", section_title, re.I):
+                partition_columns = self._parse_partition_information(buff)
+            elif re.match(
+                b"^#\\s+col_name\\s+data_type\\s+comment", section_title, re.I
+            ):
+                columns = self._parse_columns_information(buff)
+            elif re.match(b"^#\\s+storage\\s+information", section_title, re.I):
+                table_kwargs.update(self._parse_storage_details(buff))
+            elif re.match(b"^#.*", section_title, re.I):
+                self._skip_unknown_section(buff)
+            else:
+                raise Exception("Unable to parse table description")
+        return columns, partition_columns, table_kwargs
+
+    def _skip_unknown_section(self, buff) -> None:
+        for line in buff:
+            if re.match(b"^\\s*$", line):
+                return
+
+    def get_table_comment(self, connection, table_name, schema=None, **kw):
+        _, __, table_kwargs = self._get_table_details(
+            connection, table_name, schema=schema, **kw
+        )
+        return {"text": table_kwargs.get("comment")}
 
     def has_table(self, connection, table_name, schema=None):
         try:

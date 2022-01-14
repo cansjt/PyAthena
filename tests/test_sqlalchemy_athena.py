@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import io
 import re
 import textwrap
 import unittest
@@ -31,6 +32,45 @@ from sqlalchemy.sql.sqltypes import (
 from pyathena.sqlalchemy_athena import LIMIT_COMMENT_COLUMN, AthenaDialect
 from tests.conftest import ENV, SCHEMA
 from tests.util import with_engine
+
+TABLE_COMMENT = """Some description\n\nMore description\n\tcol1\tsome info\n\r"""
+TABLE_DESCRIPTION = """\
+# col_name            	data_type           	comment
+
+col_int             	int
+col_bigint          	bigint
+col_float           	double
+col_double          	double
+col_string          	string
+col_boolean         	boolean
+col_timestamp       	timestamp
+col_date            	date
+
+# Detailed Table Information
+Database:           	default
+Owner:              	hadoop
+CreateTime:         	Fri Jan 14 17:36:16 UTC 2022
+LastAccessTime:     	UNKNOWN
+Protect Mode:       	None
+Retention:          	0
+Location:           	s3://bucket/prefix/table_name
+Table Type:         	EXTERNAL_TABLE
+Table Parameters:
+	EXTERNAL            	TRUE
+	comment             	Some description\\n\\nMore description\\n\\tcol1\\tsome info\\n\\r
+	transient_lastDdlTime	1642181776
+
+# Storage Information
+SerDe Library:      	org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe
+InputFormat:        	org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat
+OutputFormat:       	org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat
+Compressed:         	No
+Num Buckets:        	-1
+Bucket Columns:     	[]
+Sort Columns:       	[]
+Storage Desc Params:
+	serialization.format	1
+"""  # noqa: E101, W191
 
 
 class TestSQLAlchemyAthena(unittest.TestCase):
@@ -675,3 +715,19 @@ class TestSQLAlchemyAthena(unittest.TestCase):
         self.assertIsNot(check_table, table)
         self.assertIsNot(check_table.metadata, table.metadata)
         self.assertEqual(check_table.c[column_name].comment, "abc d")
+
+    def test_parse_table_description(self):
+        description = io.BytesIO(TABLE_DESCRIPTION.encode("utf-8"))
+        dialect = AthenaDialect()
+        _, __, table_kwargs = dialect._parse_table_description(description)
+        self.assertIn("awsathena_location", table_kwargs)
+        self.assertEqual(
+            table_kwargs["awsathena_location"], "s3://bucket/prefix/table_name"
+        )
+        self.assertIn("comment", table_kwargs)
+        self.assertEqual(table_kwargs["comment"], TABLE_COMMENT)
+
+    @with_engine()
+    def test_table_comment_introspection(self, engine, conn):
+        table = Table("one_row", MetaData(), schema=SCHEMA, autoload_with=conn)
+        self.assertEqual(table.comment, "table comment")
