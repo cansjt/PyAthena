@@ -162,10 +162,9 @@ class TestSQLAlchemyAthena(unittest.TestCase):
         self.assertIn("one_row_complex", meta.tables)
 
         insp = sqlalchemy.inspect(engine)
-        self.assertIn(
-            "many_rows",
-            insp.get_table_names(schema=SCHEMA),
-        )
+        table_names = insp.get_table_names(schema=SCHEMA)
+        self.assertIn("many_rows", table_names)
+        self.assertNotIn("one_row_less_complex_view", table_names)
 
     @with_engine()
     def test_has_table(self, engine, conn):

@@ -31,6 +31,17 @@ CREATE EXTERNAL TABLE IF NOT EXISTS {schema}.one_row_complex (
 ROW FORMAT DELIMITED FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n' STORED AS TEXTFILE
 LOCATION '{location_one_row_complex}';
 
+CREATE OR REPLACE VIEW {schema}.one_row_less_complex_view  AS
+    SELECT
+        col_string,
+        col_binary,
+        col_array,
+        col_map,
+        col_struct,
+        col_decimal
+    FROM
+        {schema}.one_row_complex;
+
 DROP TABLE IF EXISTS {schema}.partition_table;
 CREATE EXTERNAL TABLE IF NOT EXISTS {schema}.partition_table (
     a STRING
