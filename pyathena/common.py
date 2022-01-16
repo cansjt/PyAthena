@@ -76,6 +76,14 @@ class CursorIterator(object, metaclass=ABCMeta):
 
 
 class BaseCursor(object, metaclass=ABCMeta):
+
+    # https://docs.aws.amazon.com/athena/latest/APIReference/API_ListQueryExecutions.html
+    # Valid Range: Minimum value of 0. Maximum value of 50.
+    LIST_QUERY_EXECUTIONS_MAX_RESULTS = 50
+    # https://docs.aws.amazon.com/athena/latest/APIReference/API_ListTableMetadata.html
+    # Valid Range: Minimum value of 1. Maximum value of 50.
+    LIST_TABLE_METADATA_MAX_RESULTS = 50
+
     def __init__(
         self,
         connection: "Connection",
@@ -125,32 +133,48 @@ class BaseCursor(object, metaclass=ABCMeta):
         else:
             return AthenaQueryExecution(response)
 
+    def _batch_get_query_execution(self, query_ids: List[str]) -> List[AthenaQueryExecution]:
+        try:
+            response = retry_api_call(
+                self.connection._client.batch_get_query_execution,
+                config=self._retry_config,
+                logger=_logger,
+                QueryExecutionIds=query_ids,
+            )
+        except Exception as e:
+            _logger.exception("Failed to batch get query execution.")
+            raise OperationalError(*e.args) from e
+        else:
+            return [
+                AthenaQueryExecution({"QueryExecution": r})
+                for r in response.get("QueryExecutions", [])
+            ]
+
     def _list_query_executions(
         self,
-        max_results: int,
-        work_group: Optional[str],
+        max_results: Optional[int] = None,
+        work_group: Optional[str] = None,
         next_token: Optional[str] = None,
-    ) -> Tuple[str, List[Dict[str, Any]]]:
+    ) -> Tuple[Optional[str], List[AthenaQueryExecution]]:
         request = self._build_list_query_executions_request(
-            max_results, work_group, next_token
+            max_results=max_results, work_group=work_group, next_token=next_token
         )
-        response = retry_api_call(
-            self.connection._client.list_query_executions,
-            config=self._retry_config,
-            logger=_logger,
-            **request
-        )
-        next_token = response.get("NextToken", None)
-        query_ids = response.get("QueryExecutionIds", None)
-        if not query_ids:
-            return next_token, []
-        response = retry_api_call(
-            self.connection._client.batch_get_query_execution,
-            config=self._retry_config,
-            logger=_logger,
-            QueryExecutionIds=query_ids,
-        )
-        return next_token, response.get("QueryExecutions", [])
+        try:
+            response = retry_api_call(
+                self.connection._client.list_query_executions,
+                config=self._retry_config,
+                logger=_logger,
+                **request
+            )
+        except Exception as e:
+            _logger.exception("Failed to list query executions.")
+            raise OperationalError(*e.args) from e
+        else:
+            next_token = response.get("NextToken", None)
+            query_ids = response.get("QueryExecutionIds", None)
+            if not query_ids:
+                return next_token, []
+            return next_token, self._batch_get_query_execution(query_ids)
 
     def __poll(self, query_id: str) -> AthenaQueryExecution:
         while True:
@@ -214,11 +238,15 @@ class BaseCursor(object, metaclass=ABCMeta):
 
     def _build_list_query_executions_request(
         self,
-        max_results: int,
+        max_results: Optional[int],
         work_group: Optional[str],
         next_token: Optional[str] = None,
     ) -> Dict[str, Any]:
-        request: Dict[str, Any] = {"MaxResults": max_results}
+        request: Dict[str, Any] = {
+            "MaxResults": max_results
+            if max_results
+            else self.LIST_QUERY_EXECUTIONS_MAX_RESULTS
+        }
         if self._work_group or work_group:
             request.update(
                 {"WorkGroup": work_group if work_group else self._work_group}
@@ -246,7 +274,7 @@ class BaseCursor(object, metaclass=ABCMeta):
         try:
             next_token = None
             while cache_size > 0:
-                max_results = min(cache_size, 50)  # 50 is max allowed by AWS API
+                max_results = min(cache_size, self.LIST_QUERY_EXECUTIONS_MAX_RESULTS)
                 cache_size -= max_results
                 next_token, query_executions = self._list_query_executions(
                     max_results, work_group, next_token=next_token
@@ -255,25 +283,22 @@ class BaseCursor(object, metaclass=ABCMeta):
                     (
                         e
                         for e in query_executions
-                        if e["Status"]["State"] == AthenaQueryExecution.STATE_SUCCEEDED
-                        and e["StatementType"]
-                        == AthenaQueryExecution.STATEMENT_TYPE_DML
+                        if e.state == AthenaQueryExecution.STATE_SUCCEEDED
+                        and e.statement_type == AthenaQueryExecution.STATEMENT_TYPE_DML
                     ),
                     # https://github.com/python/mypy/issues/9656
-                    key=lambda e: e["Status"]["CompletionDateTime"],  # type: ignore
+                    key=lambda e: e.completion_date_time,  # type: ignore
                     reverse=True,
                 ):
                     if (
                         cache_expiration_time > 0
-                        and execution["Status"]["CompletionDateTime"].astimezone(
-                            timezone.utc
-                        )
+                        and execution.completion_date_time.astimezone(timezone.utc)
                         < expiration_time
                     ):
                         next_token = None
                         break
-                    if execution["Query"] == query:
-                        query_id = execution["QueryExecutionId"]
+                    if execution.query == query:
+                        query_id = execution.query_id
                         break
                 if query_id or next_token is None:
                     break
