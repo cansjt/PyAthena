@@ -394,6 +394,11 @@ class AthenaDialect(DefaultDialect):
         # https://docs.aws.amazon.com/athena/latest/APIReference/API_TableMetadata.html
         return [t.name for t in tables if t.table_type == "EXTERNAL_TABLE"]
 
+    @reflection.cache
+    def get_view_names(self, connection, schema=None, **kw):
+        tables = self._get_tables(connection, schema, **kw)
+        return [t.name for t in tables if t.table_type == "VIRTUAL_VIEW"]
+
     def has_table(self, connection, table_name, schema=None, **kw):
         try:
             columns = self.get_columns(connection, table_name, schema)

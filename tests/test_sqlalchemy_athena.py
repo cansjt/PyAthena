@@ -10,11 +10,11 @@ from urllib.parse import quote_plus
 import numpy as np
 import pandas as pd
 import sqlalchemy
-from sqlalchemy import String
+from sqlalchemy import BigInteger, Boolean, Integer, String
 from sqlalchemy.engine import create_engine
 from sqlalchemy.exc import NoSuchTableError, OperationalError, ProgrammingError
 from sqlalchemy.sql import expression
-from sqlalchemy.sql.ddl import CreateTable
+from sqlalchemy.sql.ddl import CreateTable, DDL
 from sqlalchemy.sql.schema import Column, MetaData, Table
 from sqlalchemy.sql.sqltypes import (
     BIGINT,
@@ -579,3 +579,33 @@ class TestSQLAlchemyAthena(unittest.TestCase):
                 """
             ),
         )
+
+    @with_engine()
+    def test_get_view_names(self, engine, conn):
+        insp = sqlalchemy.inspect(engine)
+        view_name = 'one_row_less_complex_view_1'
+        CREATE_VIEW_QUERY = f'''
+        CREATE VIEW {SCHEMA}.{view_name} AS
+            SELECT col_timestamp, col_date FROM one_row_complex
+        '''
+        conn.execute(DDL(CREATE_VIEW_QUERY))
+        view_names = insp.get_view_names(schema=SCHEMA)
+        self.assertEqual(view_names, [view_name])
+
+    @with_engine()
+    def test_introspect_view_as_table(self, engine, conn):
+        view_name = 'one_row_less_complex_view_2'
+        CREATE_VIEW_QUERY = f'''
+        CREATE VIEW {SCHEMA}.{view_name} AS
+            SELECT col_boolean, col_int, col_bigint FROM one_row_complex
+        '''
+        conn.execute(DDL(CREATE_VIEW_QUERY))
+        view = Table(view_name, MetaData(schema=SCHEMA), autoload_with=conn)
+        self.assertEqual(view.name, view_name)
+        self.assertEqual(view.schema, SCHEMA)
+        self.assertEqual(len(view.c), 3)
+        self.assertTrue(isinstance(view.c['col_boolean'].type, Boolean))
+        self.assertTrue(isinstance(view.c['col_int'].type, Integer))
+        self.assertTrue(isinstance(view.c['col_bigint'].type, BigInteger))
+        self.assertEqual(view.dialect_options['awsathena']['location'], None)
+        self.assertEqual(view.dialect_options['awsathena']['compression'], None)
