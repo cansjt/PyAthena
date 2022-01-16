@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 from pyathena.converter import Converter
 from pyathena.error import DatabaseError, OperationalError, ProgrammingError
 from pyathena.formatter import Formatter
-from pyathena.model import AthenaQueryExecution
+from pyathena.model import AthenaQueryExecution, AthenaTableMetadata
 from pyathena.util import RetryConfig, retry_api_call
 
 if TYPE_CHECKING:
@@ -133,6 +133,30 @@ class BaseCursor(object, metaclass=ABCMeta):
         else:
             return AthenaQueryExecution(response)
 
+    def _get_table_metadata(
+        self,
+        table_name: str,
+        catalog_name: Optional[str] = None,
+        schema_name: Optional[str] = None,
+    ):
+        request = {
+            "CatalogName": catalog_name if catalog_name else self._catalog_name,
+            "DatabaseName": schema_name if schema_name else self._schema_name,
+            "TableName": table_name,
+        }
+        try:
+            response = retry_api_call(
+                self._connection.client.get_table_metadata,
+                config=self._retry_config,
+                logger=_logger,
+                **request
+            )
+        except Exception as e:
+            _logger.exception("Failed to get table metadata.")
+            raise OperationalError(*e.args) from e
+        else:
+            return AthenaTableMetadata(response)
+
     def _batch_get_query_execution(self, query_ids: List[str]) -> List[AthenaQueryExecution]:
         try:
             response = retry_api_call(
@@ -175,6 +199,37 @@ class BaseCursor(object, metaclass=ABCMeta):
             if not query_ids:
                 return next_token, []
             return next_token, self._batch_get_query_execution(query_ids)
+
+    def _list_table_metadata(
+        self,
+        max_results: Optional[int] = None,
+        catalog_name: Optional[str] = None,
+        schema_name: Optional[str] = None,
+        expression: Optional[str] = None,
+        next_token: Optional[str] = None,
+    ):
+        request = self._build_list_table_metadata_request(
+            max_results=max_results,
+            catalog_name=catalog_name,
+            schema_name=schema_name,
+            expression=expression,
+            next_token=next_token,
+        )
+        try:
+            response = retry_api_call(
+                self.connection._client.list_table_metadata,
+                config=self._retry_config,
+                logger=_logger,
+                **request
+            )
+        except Exception as e:
+            _logger.exception("Failed to list table metadata.")
+            raise OperationalError(*e.args) from e
+        else:
+            return response.get("NextToken", None), [
+                AthenaTableMetadata({"TableMetadata": r})
+                for r in response.get("TableMetadataList", [])
+            ]
 
     def __poll(self, query_id: str) -> AthenaQueryExecution:
         while True:
@@ -251,6 +306,27 @@ class BaseCursor(object, metaclass=ABCMeta):
             request.update(
                 {"WorkGroup": work_group if work_group else self._work_group}
             )
+        if next_token:
+            request.update({"NextToken": next_token})
+        return request
+
+    def _build_list_table_metadata_request(
+        self,
+        max_results: Optional[int],
+        catalog_name: Optional[str],
+        schema_name: Optional[str],
+        expression: Optional[str] = None,
+        next_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        request: Dict[str, Any] = {
+            "MaxResults": max_results
+            if max_results
+            else self.LIST_TABLE_METADATA_MAX_RESULTS,
+            "CatalogName": catalog_name if catalog_name else self._catalog_name,
+            "DatabaseName": schema_name if schema_name else self._schema_name,
+        }
+        if expression:
+            request.update({"Expression": expression})
         if next_token:
             request.update({"NextToken": next_token})
         return request
